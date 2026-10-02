@@ -98,6 +98,18 @@ class Critic(Middleware):
         observed = ctx.observed_text
         kept = []
         split_conflict = False
+
+        def source_for(part):
+            return next(
+                (
+                    doc
+                    for doc in (ctx.corpus.docs if ctx.corpus else [])
+                    if part in observed
+                    and any(part in line for line in doc.body.splitlines())
+                ),
+                None,
+            )
+
         for claim in claims:
             if not isinstance(claim, dict) or not isinstance(claim.get("text"), str):
                 continue
@@ -105,29 +117,40 @@ class Critic(Middleware):
             if text and text in observed:
                 kept.append(claim)
                 continue
-            parts = text.split(" và ", 1)
-            if len(parts) != 2 or not all(parts):
+
+            # A quoted half may itself contain " và ". Try every join point
+            # and keep only a split whose two sides are observed verbatim
+            # excerpts from distinct documents.
+            split = None
+            marker = " và "
+            offset = 0
+            while True:
+                join = text.find(marker, offset)
+                if join < 0:
+                    break
+                left, right = text[:join], text[join + len(marker):]
+                if left and right:
+                    left_doc = source_for(left)
+                    right_doc = source_for(right)
+                    if (
+                        left_doc is not None
+                        and right_doc is not None
+                        and left_doc.doc_id != right_doc.doc_id
+                    ):
+                        split = (left, right, left_doc, right_doc)
+                        break
+                # Advance one character so overlapping markers such as
+                # " và và " expose the second, valid join point.
+                offset = join + 1
+
+            if split is None:
                 continue
-            sources = []
-            for part in parts:
-                source = next(
-                    (
-                        doc
-                        for doc in (ctx.corpus.docs if ctx.corpus else [])
-                        if part in observed
-                        and any(part in line for line in doc.body.splitlines())
-                    ),
-                    None,
-                )
-                sources.append(source)
-            if sources[0] is None or sources[1] is None:
-                continue
-            if sources[0].doc_id == sources[1].doc_id:
-                continue
+
+            left, right, left_doc, right_doc = split
             kept.extend(
                 [
-                    {"text": parts[0], "doc_id": sources[0].doc_id},
-                    {"text": parts[1], "doc_id": sources[1].doc_id},
+                    {"text": left, "doc_id": left_doc.doc_id},
+                    {"text": right, "doc_id": right_doc.doc_id},
                 ]
             )
             split_conflict = True
